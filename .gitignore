@@ -1,0 +1,48 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Dd]ebug/
+[Rr]elease/
+[Xx]64/
+[Xx]86/
+build/
+artifacts/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+*_i.c
+*_p.c
+
+# Test / coverage
+[Tt]est[Rr]esult*/
+*.coverage
+*.coveragexml
+coverage/
+TestResults/
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+.nuget/
+
+# ReSharper
+_ReSharper*/
+*.DotSettings.user
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# App runtime / logs
+purepad-error.log
+*.log
+*.purepad.tmp
