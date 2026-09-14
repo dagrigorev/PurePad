@@ -53,6 +53,19 @@ public sealed class CodeSyntaxHighlighterTests
     }
 
     [Fact]
+    public void String_ending_in_backslash_stays_within_bounds()
+    {
+        // A line ending with a backslash inside an unterminated string must not report a token
+        // span past the text (which previously overran by one and could fault the renderer).
+        const string code = "s = \"abc\\";
+
+        var tokens = _highlighter.Tokenize(code).ToList();
+
+        Assert.All(tokens, t => Assert.True(t.Start + t.Length <= code.Length,
+            $"token [{t.Start},{t.Start + t.Length}) exceeds length {code.Length}"));
+    }
+
+    [Fact]
     public void Does_not_classify_keyword_substrings_inside_identifiers()
     {
         const string code = "internalValue intentional";

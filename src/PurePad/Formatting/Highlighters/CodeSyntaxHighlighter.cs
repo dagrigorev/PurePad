@@ -97,7 +97,7 @@ public sealed class CodeSyntaxHighlighter : ISyntaxHighlighter
             char c = text[i];
             if (c == '\\')
             {
-                i += 2;
+                i += 2; // skip the escaped char (may step one past the end — clamped below)
                 continue;
             }
 
@@ -115,7 +115,7 @@ public sealed class CodeSyntaxHighlighter : ISyntaxHighlighter
             i++;
         }
 
-        return i;
+        return Math.Min(i, text.Length); // a trailing backslash can overshoot by one
     }
 
     private static int ScanNumber(string text, int start)

@@ -17,6 +17,7 @@ public sealed partial class MainForm
     private ToolStripMenuItem _diagnosticsItem = null!;
     private ToolStripMenuItem _folderViewItem = null!;
     private ToolStripMenuItem _stickyScrollItem = null!;
+    private ToolStripMenuItem _antialiasItem = null!;
     private ToolStripMenuItem _autoFormatItem = null!;
     private ContextMenuStrip _editorContextMenu = null!;
     private ToolStripMenuItem _recentMenu = null!;
@@ -135,10 +136,12 @@ public sealed partial class MainForm
         _diagnosticsItem = new ToolStripMenuItem("&Problems Panel", null, (s, e) => ToggleDiagnostics());
         _folderViewItem = new ToolStripMenuItem("&Folder View", null, (s, e) => ToggleFolderView());
         _stickyScrollItem = new ToolStripMenuItem("S&ticky Scroll", null, (s, e) => ToggleStickyScroll());
+        _antialiasItem = new ToolStripMenuItem("Smooth Text (&Antialias)", null, (s, e) => ToggleAntialias());
         view.DropDownItems.Add(_folderViewItem);
         view.DropDownItems.Add(_statusBarItem);
         view.DropDownItems.Add(_diagnosticsItem);
         view.DropDownItems.Add(_stickyScrollItem);
+        view.DropDownItems.Add(_antialiasItem);
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(BuildThemeMenu());
         return view;
@@ -234,6 +237,7 @@ public sealed partial class MainForm
         _recentMenu.Enabled = _recentFiles.Count > 0;
         _diagnosticsItem.Checked = _diagnostics.Visible;
         _stickyScrollItem.Checked = _largeViewer.StickyScrollEnabled;
+        _antialiasItem.Checked = _largeViewer.TextAntialiasing;
         _autoFormatItem.Checked = _controller.AutoFormatOnSave;
     }
 

@@ -80,6 +80,10 @@ internal static class Program
             {
                 form.DebugZoomSteps = zoom;
             }
+            else if (arg.StartsWith("--reopen=", StringComparison.OrdinalIgnoreCase))
+            {
+                form.DebugReopenPath = arg["--reopen=".Length..].Trim('"');
+            }
             else if (arg.StartsWith("--fold=", StringComparison.OrdinalIgnoreCase))
             {
                 foreach (string part in arg["--fold=".Length..].Split(',', StringSplitOptions.RemoveEmptyEntries))

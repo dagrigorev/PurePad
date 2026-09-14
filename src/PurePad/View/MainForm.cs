@@ -125,6 +125,9 @@ public sealed partial class MainForm : Form
     /// <summary>Debug hook: zoom steps applied before the capture.</summary>
     public int DebugZoomSteps { get; set; }
 
+    /// <summary>Debug hook: open a second file (via the folder-view path) before the capture.</summary>
+    public string? DebugReopenPath { get; set; }
+
     /// <summary>Enable the debug screenshot hook: capture to <paramref name="path"/> once shown, then close.</summary>
     public void ScheduleScreenshot(string path)
     {
@@ -316,6 +319,12 @@ public sealed partial class MainForm : Form
             timer.Dispose();
             try
             {
+                if (DebugReopenPath is { } reopen)
+                {
+                    OpenFromFolderView(reopen);
+                    for (int i = 0; i < 40; i++) { Application.DoEvents(); System.Threading.Thread.Sleep(20); }
+                }
+
                 if (DebugZoomSteps != 0)
                 {
                     _largeViewer.Zoom(DebugZoomSteps);
@@ -560,6 +569,12 @@ public sealed partial class MainForm : Form
     private void ToggleStickyScroll()
     {
         _largeViewer.StickyScrollEnabled = !_largeViewer.StickyScrollEnabled;
+        PersistSettings();
+    }
+
+    private void ToggleAntialias()
+    {
+        _largeViewer.TextAntialiasing = !_largeViewer.TextAntialiasing;
         PersistSettings();
     }
 
@@ -856,6 +871,7 @@ public sealed partial class MainForm : Form
         _statusBarRequested = settings.StatusBarVisible;
         _controller.AutoFormatOnSave = settings.AutoFormatOnSave;
         _largeViewer.StickyScrollEnabled = settings.StickyScrollVisible;
+        _largeViewer.TextAntialiasing = settings.EditorAntialias;
 
         _recentFiles.Clear();
         _recentFiles.AddRange(settings.RecentFiles.Take(MaxRecentFiles));
@@ -947,6 +963,7 @@ public sealed partial class MainForm : Form
             RecentFiles = new List<string>(_recentFiles),
             ProblemsPanelVisible = _diagnostics.Visible,
             StickyScrollVisible = _largeViewer.StickyScrollEnabled,
+            EditorAntialias = _largeViewer.TextAntialiasing,
             AutoFormatOnSave = _controller.AutoFormatOnSave,
             SyntaxMode = _controller.SyntaxMode switch
             {

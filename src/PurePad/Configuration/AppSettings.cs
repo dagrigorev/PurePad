@@ -22,6 +22,7 @@ public sealed class AppSettings
     public bool ProblemsPanelVisible { get; set; }
     public bool AutoFormatOnSave { get; set; }
     public bool StickyScrollVisible { get; set; } = true;
+    public bool EditorAntialias { get; set; } = true;
     public int EditorZoomSteps { get; set; }
     public bool MinimapVisible { get; set; }
     public bool LineGuideVisible { get; set; }

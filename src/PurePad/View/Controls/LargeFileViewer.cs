@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Drawing.Text;
 using System.Text;
 using System.Windows.Forms;
 using PurePad.Editor;
@@ -47,6 +48,22 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     private ISyntaxHighlighter? _highlighter;
     private SyntaxTheme? _syntaxTheme;
+
+    private bool _antialias = true;
+    private TextRenderingHint TextHint => _antialias ? TextRenderingHint.ClearTypeGridFit : TextRenderingHint.SingleBitPerPixelGridFit;
+
+    /// <summary>Whether editor text is drawn antialiased (ClearType) or hard-edged.</summary>
+    public bool TextAntialiasing
+    {
+        get => _antialias;
+        set { if (_antialias != value) { _antialias = value; Invalidate(); } }
+    }
+
+    // Typographic layout keeps GDI+ glyph advances on the monospace grid (matches TextRenderer metrics).
+    private static readonly StringFormat GlyphFormat = new(StringFormat.GenericTypographic)
+    {
+        FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.MeasureTrailingSpaces | StringFormatFlags.NoClip,
+    };
 
     private (int Open, int Close)? _bracketMatch; // char positions, when the caret is by a bracket
     private const int MaxBracketScan = 200_000;
@@ -1021,6 +1038,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     {
         Graphics g = e.Graphics;
         g.Clear(_background);
+        g.TextRenderingHint = TextHint;
         if (LineCount == 0)
         {
             return;
@@ -1062,12 +1080,20 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
             if (_highlighter is not null && _syntaxTheme is not null && slice.Length > 0)
             {
-                DrawColouredSlice(g, lineIndex, startCol, content, slice, xOrigin, y);
+                try
+                {
+                    DrawColouredSlice(g, lineIndex, startCol, content, slice, xOrigin, y);
+                }
+                catch (Exception ex)
+                {
+                    // A highlighter bug must never blank the whole editor: fall back to plain text.
+                    DrawGlyphs(g, slice, xOrigin, y, _foreground);
+                    LogRenderFault(ex);
+                }
             }
             else
             {
-                TextRenderer.DrawText(g, slice, Font, new Point(xOrigin, y), _foreground,
-                    TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                DrawGlyphs(g, slice, xOrigin, y, _foreground);
             }
 
             // Marker that a collapsed block follows this (visible) head line.
@@ -1084,11 +1110,20 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
             g.ResetClip();
         }
 
-        DrawBracketGuide(g, contentClip);
-        DrawBracketMatch(g, contentClip);
-        DrawCaret(g);
-        DrawGutter(g);
-        DrawStickyHeaders(g);
+        // Overlays are guarded so an overlay bug can never blank the editor to the WinForms
+        // red-X placeholder — the text is already painted; a fault just skips the decorations.
+        try
+        {
+            DrawBracketGuide(g, contentClip);
+            DrawBracketMatch(g, contentClip);
+            DrawCaret(g);
+            DrawGutter(g);
+            DrawStickyHeaders(g);
+        }
+        catch (Exception ex)
+        {
+            LogRenderFault(ex);
+        }
 
         if (newMaxChars != _maxLineChars)
         {
@@ -1229,7 +1264,41 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
         string run = slice.Substring(from, to - from);
         int x = xOrigin + from * _charWidth;
-        TextRenderer.DrawText(g, run, Font, new Point(x, y), color, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        DrawGlyphs(g, run, x, y, color);
+    }
+
+    private bool _renderFaultLogged;
+
+    /// <summary>Record the first per-line render fault to the error log (once per session).</summary>
+    private void LogRenderFault(Exception ex)
+    {
+        if (_renderFaultLogged)
+        {
+            return;
+        }
+
+        _renderFaultLogged = true;
+        try
+        {
+            string path = Path.Combine(Path.GetTempPath(), "purepad-error.log");
+            File.AppendAllText(path, $"{DateTime.Now:o} render fault: {ex}\n\n");
+        }
+        catch
+        {
+            // logging must never itself throw during a paint
+        }
+    }
+
+    /// <summary>Draw a run of monospace text with the current antialiasing hint, on the character grid.</summary>
+    private void DrawGlyphs(Graphics g, string text, int x, int y, Color color)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        using var brush = new SolidBrush(color);
+        g.DrawString(text, Font, brush, x, y, GlyphFormat);
     }
 
     private void DrawSelection(Graphics g, int y, int fromCol, int toCol)
