@@ -8,10 +8,16 @@ namespace PurePad.View.Controls;
 /// Rasterizes an emoji glyph to a color <see cref="Bitmap"/> using Direct2D + DirectWrite.
 /// GDI+/<c>Graphics.DrawString</c> only draws the monochrome outline of a color (COLR) font
 /// such as Segoe UI Emoji; Direct2D's <c>DrawText</c> with the color-font option renders the
-/// real multi-layer glyph. The COM stack (D2D, DWrite, WIC factories) is created once and
-/// reused. If any part is unavailable the renderer reports <see cref="IsAvailable"/> = false
-/// so callers can fall back to plain text.
+/// real multi-layer glyph.
 /// </summary>
+/// <remarks>
+/// The COM objects are driven by reading their vtable slots directly rather than through
+/// <c>[ComImport]</c> interfaces: the CLR's COM marshaller mishandles the <c>in</c>-struct
+/// parameters these methods take (color, rect, render-target properties), corrupting the stack.
+/// Binding each method as an explicit stdcall delegate passes those by-reference structs
+/// correctly. If any factory is unavailable the renderer reports <see cref="IsAvailable"/> =
+/// false so callers can fall back to plain text.
+/// </remarks>
 internal sealed class ColorEmojiRenderer : IDisposable
 {
     // ---- native factory entry points -----------------------------------
@@ -41,14 +47,27 @@ internal sealed class ColorEmojiRenderer : IDisposable
     private const int DWRITE_TEXT_ALIGNMENT_CENTER = 2;
     private const int DWRITE_PARAGRAPH_ALIGNMENT_CENTER = 2;
 
-    // ---- interop structs -----------------------------------------------
+    // Vtable slot indices (IUnknown occupies 0-2).
+    private const int WicCreateBitmapSlot = 17;
+    private const int D2DCreateWicBitmapRenderTargetSlot = 13;
+    private const int DWriteCreateTextFormatSlot = 15;
+    private const int FormatSetTextAlignmentSlot = 3;
+    private const int FormatSetParagraphAlignmentSlot = 4;
+    private const int RtCreateSolidColorBrushSlot = 8;
+    private const int RtDrawTextSlot = 27;
+    private const int RtClearSlot = 47;
+    private const int RtBeginDrawSlot = 48;
+    private const int RtEndDrawSlot = 49;
+    private const int BitmapSourceCopyPixelsSlot = 7;
+
+    // ---- interop structs (blittable; passed by reference) ---------------
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RenderTargetProperties
     {
         public int Type;
-        public int PixelFormat;      // DXGI_FORMAT
-        public int AlphaMode;        // D2D1_ALPHA_MODE
+        public int PixelFormat;
+        public int AlphaMode;
         public float DpiX;
         public float DpiY;
         public int Usage;
@@ -67,102 +86,74 @@ internal sealed class ColorEmojiRenderer : IDisposable
         public float Left, Top, Right, Bottom;
     }
 
-    // ---- COM interfaces (vtable order matters; unused slots are placeholders) ----
+    // ---- vtable method delegates ---------------------------------------
 
-    [ComImport, Guid("06152247-6f50-465a-9245-118bfd3b6007"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface ID2D1Factory
-    {
-        void _0(); void _1(); void _2(); void _3(); void _4(); void _5();
-        void _6(); void _7(); void _8(); void _9();
-        [PreserveSig] int CreateWicBitmapRenderTarget(IntPtr target, in RenderTargetProperties props, out IntPtr renderTarget);
-    }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CreateBitmapDelegate(IntPtr self, int width, int height, in Guid pixelFormat, int cacheOption, out IntPtr bitmap);
 
-    [ComImport, Guid("2cd90694-12e2-11dc-9fed-001143a055f9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface ID2D1RenderTarget
-    {
-        void _s3(); // GetFactory (ID2D1Resource)
-        void _s4(); void _s5(); void _s6(); void _s7(); // CreateBitmap..CreateBitmapBrush
-        [PreserveSig] int CreateSolidColorBrush(in ColorF color, IntPtr brushProps, out IntPtr brush); // slot 8
-        // slots 9..26 (18 methods) up to DrawText
-        void _s9(); void _s10(); void _s11(); void _s12(); void _s13(); void _s14();
-        void _s15(); void _s16(); void _s17(); void _s18(); void _s19(); void _s20();
-        void _s21(); void _s22(); void _s23(); void _s24(); void _s25(); void _s26();
-        [PreserveSig] void DrawText([MarshalAs(UnmanagedType.LPWStr)] string text, int length, IntPtr textFormat,
-            in RectF layoutRect, IntPtr brush, int options, int measuringMode); // slot 27
-        // slots 28..46 (19 methods) up to Clear
-        void _s28(); void _s29(); void _s30(); void _s31(); void _s32(); void _s33();
-        void _s34(); void _s35(); void _s36(); void _s37(); void _s38(); void _s39();
-        void _s40(); void _s41(); void _s42(); void _s43(); void _s44(); void _s45();
-        void _s46();
-        [PreserveSig] void Clear(IntPtr color);              // slot 47
-        [PreserveSig] void BeginDraw();                      // slot 48
-        [PreserveSig] int EndDraw(IntPtr tag1, IntPtr tag2); // slot 49
-    }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CreateWicRenderTargetDelegate(IntPtr self, IntPtr target, in RenderTargetProperties props, out IntPtr renderTarget);
 
-    [ComImport, Guid("b859ee5a-d838-4b5b-a2e8-1adc7d93db48"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IDWriteFactory
-    {
-        void _0(); void _1(); void _2(); void _3(); void _4(); void _5();
-        void _6(); void _7(); void _8(); void _9(); void _10(); void _11();
-        [PreserveSig] int CreateTextFormat([MarshalAs(UnmanagedType.LPWStr)] string fontFamily, IntPtr collection,
-            int weight, int style, int stretch, float fontSize,
-            [MarshalAs(UnmanagedType.LPWStr)] string localeName, out IntPtr textFormat); // slot 15
-    }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CreateTextFormatDelegate(IntPtr self, [MarshalAs(UnmanagedType.LPWStr)] string fontFamily, IntPtr collection,
+        int weight, int style, int stretch, float fontSize, [MarshalAs(UnmanagedType.LPWStr)] string localeName, out IntPtr textFormat);
 
-    [ComImport, Guid("9c906818-31d7-4fd3-a151-7c5e225db55a"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IDWriteTextFormat
-    {
-        [PreserveSig] int SetTextAlignment(int alignment);      // slot 3
-        [PreserveSig] int SetParagraphAlignment(int alignment); // slot 4
-    }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int SetInt32Delegate(IntPtr self, int value);
 
-    [ComImport, Guid("ec5ec8a9-c395-4314-9c77-54d7a935ff70"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IWICImagingFactory
-    {
-        void _0(); void _1(); void _2(); void _3(); void _4(); void _5();
-        void _6(); void _7(); void _8(); void _9(); void _10(); void _11();
-        void _12(); void _13();
-        [PreserveSig] int CreateBitmap(int width, int height, in Guid pixelFormat, int cacheOption, out IntPtr bitmap); // slot 17
-    }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CreateSolidColorBrushDelegate(IntPtr self, in ColorF color, IntPtr brushProps, out IntPtr brush);
 
-    [ComImport, Guid("00000121-a8f2-4877-ba0a-fd2b6645fb94"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IWICBitmap
-    {
-        void _0(); void _1(); void _2(); void _3(); // IWICBitmapSource: GetSize/GetPixelFormat/GetResolution/CopyPalette
-        [PreserveSig] int CopyPixels(IntPtr rect, int stride, int bufferSize, byte[] buffer); // slot 7
-    }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void BeginDrawDelegate(IntPtr self);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void ClearDelegate(IntPtr self, IntPtr color);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void DrawTextDelegate(IntPtr self, [MarshalAs(UnmanagedType.LPWStr)] string text, int length,
+        IntPtr textFormat, in RectF layoutRect, IntPtr brush, int options, int measuringMode);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int EndDrawDelegate(IntPtr self, IntPtr tag1, IntPtr tag2);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CopyPixelsDelegate(IntPtr self, IntPtr rect, int stride, int bufferSize, byte[] buffer);
 
     // ---- instance state -------------------------------------------------
 
-    private readonly ID2D1Factory? _d2d;
-    private readonly IDWriteFactory? _dwrite;
-    private readonly IWICImagingFactory? _wic;
+    private readonly IntPtr _d2d;
+    private readonly IntPtr _dwrite;
+    private readonly IntPtr _wic;
     private readonly Dictionary<int, IntPtr> _formatsBySize = new(); // px -> IDWriteTextFormat*
 
     public ColorEmojiRenderer()
     {
         try
         {
-            if (D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_ID2D1Factory, IntPtr.Zero, out IntPtr d2d) >= 0 &&
-                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, IID_IDWriteFactory, out IntPtr dw) >= 0 &&
-                CoCreateInstance(CLSID_WICImagingFactory, IntPtr.Zero, CLSCTX_INPROC_SERVER, IID_IWICImagingFactory, out IntPtr wic) >= 0)
+            if (D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_ID2D1Factory, IntPtr.Zero, out _d2d) >= 0 &&
+                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, IID_IDWriteFactory, out _dwrite) >= 0 &&
+                CoCreateInstance(CLSID_WICImagingFactory, IntPtr.Zero, CLSCTX_INPROC_SERVER, IID_IWICImagingFactory, out _wic) >= 0)
             {
-                _d2d = (ID2D1Factory)Marshal.GetTypedObjectForIUnknown(d2d, typeof(ID2D1Factory));
-                _dwrite = (IDWriteFactory)Marshal.GetTypedObjectForIUnknown(dw, typeof(IDWriteFactory));
-                _wic = (IWICImagingFactory)Marshal.GetTypedObjectForIUnknown(wic, typeof(IWICImagingFactory));
-                Marshal.Release(d2d);
-                Marshal.Release(dw);
-                Marshal.Release(wic);
+                IsAvailable = _d2d != IntPtr.Zero && _dwrite != IntPtr.Zero && _wic != IntPtr.Zero;
             }
         }
-        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or COMException or InvalidCastException)
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
         {
-            _d2d = null;
+            IsAvailable = false;
         }
     }
 
     /// <summary>True when the Direct2D stack initialized and glyphs can be rendered.</summary>
-    public bool IsAvailable => _d2d is not null && _dwrite is not null && _wic is not null;
+    public bool IsAvailable { get; }
+
+    /// <summary>Bind vtable slot <paramref name="slot"/> of COM object <paramref name="obj"/> as a delegate.</summary>
+    private static T Method<T>(IntPtr obj, int slot) where T : Delegate
+    {
+        IntPtr vtable = Marshal.ReadIntPtr(obj);
+        IntPtr function = Marshal.ReadIntPtr(vtable, slot * IntPtr.Size);
+        return Marshal.GetDelegateForFunctionPointer<T>(function);
+    }
 
     /// <summary>
     /// Render <paramref name="emoji"/> centered in a <paramref name="size"/>×<paramref name="size"/>
@@ -178,53 +169,47 @@ internal sealed class ColorEmojiRenderer : IDisposable
         IntPtr wicBitmap = IntPtr.Zero, renderTarget = IntPtr.Zero, brush = IntPtr.Zero;
         try
         {
-            if (_wic!.CreateBitmap(size, size, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, out wicBitmap) < 0)
+            if (Method<CreateBitmapDelegate>(_wic, WicCreateBitmapSlot)(_wic, size, size, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, out wicBitmap) < 0)
             {
                 return null;
             }
 
             var props = new RenderTargetProperties
             {
-                Type = 0,
                 PixelFormat = DXGI_FORMAT_B8G8R8A8_UNORM,
                 AlphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED,
                 DpiX = 96,
                 DpiY = 96,
-                Usage = 0,
-                MinLevel = 0,
             };
 
-            if (_d2d!.CreateWicBitmapRenderTarget(wicBitmap, props, out renderTarget) < 0)
+            if (Method<CreateWicRenderTargetDelegate>(_d2d, D2DCreateWicBitmapRenderTargetSlot)(_d2d, wicBitmap, props, out renderTarget) < 0)
             {
-                return null;
-            }
-
-            var rt = (ID2D1RenderTarget)Marshal.GetTypedObjectForIUnknown(renderTarget, typeof(ID2D1RenderTarget));
-            var black = new ColorF { R = 0, G = 0, B = 0, A = 1 };
-            if (rt.CreateSolidColorBrush(black, IntPtr.Zero, out brush) < 0)
-            {
-                Marshal.ReleaseComObject(rt);
                 return null;
             }
 
             IntPtr format = GetTextFormat(size);
-            var rect = new RectF { Left = 0, Top = 0, Right = size, Bottom = size };
+            if (format == IntPtr.Zero)
+            {
+                return null;
+            }
 
-            rt.BeginDraw();
-            rt.Clear(IntPtr.Zero); // transparent
-            rt.DrawText(emoji, emoji.Length, format, rect, brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, 0);
-            int hr = rt.EndDraw(IntPtr.Zero, IntPtr.Zero);
-            Marshal.ReleaseComObject(rt);
-            if (hr < 0)
+            var black = new ColorF { A = 1 };
+            if (Method<CreateSolidColorBrushDelegate>(renderTarget, RtCreateSolidColorBrushSlot)(renderTarget, black, IntPtr.Zero, out brush) < 0)
+            {
+                return null;
+            }
+
+            var rect = new RectF { Right = size, Bottom = size };
+            Method<BeginDrawDelegate>(renderTarget, RtBeginDrawSlot)(renderTarget);
+            Method<ClearDelegate>(renderTarget, RtClearSlot)(renderTarget, IntPtr.Zero); // transparent
+            Method<DrawTextDelegate>(renderTarget, RtDrawTextSlot)(renderTarget, emoji, emoji.Length, format, rect, brush,
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, 0);
+            if (Method<EndDrawDelegate>(renderTarget, RtEndDrawSlot)(renderTarget, IntPtr.Zero, IntPtr.Zero) < 0)
             {
                 return null;
             }
 
             return CopyToBitmap(wicBitmap, size);
-        }
-        catch (Exception ex) when (ex is COMException or InvalidCastException)
-        {
-            return null;
         }
         finally
         {
@@ -241,54 +226,42 @@ internal sealed class ColorEmojiRenderer : IDisposable
             return cached;
         }
 
-        // Glyph slightly smaller than the cell so it isn't clipped by its side bearings.
-        if (_dwrite!.CreateTextFormat("Segoe UI Emoji", IntPtr.Zero, 400, 0, 5, size * 0.82f, "", out IntPtr format) < 0)
+        // Glyph slightly smaller than the cell so its side bearings aren't clipped.
+        if (Method<CreateTextFormatDelegate>(_dwrite, DWriteCreateTextFormatSlot)(_dwrite, "Segoe UI Emoji", IntPtr.Zero,
+            400, 0, 5, size * 0.82f, "", out IntPtr format) < 0)
         {
-            _formatsBySize[size] = IntPtr.Zero;
-            return IntPtr.Zero;
+            return _formatsBySize[size] = IntPtr.Zero;
         }
 
-        var fmt = (IDWriteTextFormat)Marshal.GetTypedObjectForIUnknown(format, typeof(IDWriteTextFormat));
-        fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        Marshal.ReleaseComObject(fmt);
-
-        _formatsBySize[size] = format;
-        return format;
+        Method<SetInt32Delegate>(format, FormatSetTextAlignmentSlot)(format, DWRITE_TEXT_ALIGNMENT_CENTER);
+        Method<SetInt32Delegate>(format, FormatSetParagraphAlignmentSlot)(format, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        return _formatsBySize[size] = format;
     }
 
-    private static Bitmap? CopyToBitmap(IntPtr wicBitmapPtr, int size)
+    private static Bitmap? CopyToBitmap(IntPtr wicBitmap, int size)
     {
-        var source = (IWICBitmap)Marshal.GetTypedObjectForIUnknown(wicBitmapPtr, typeof(IWICBitmap));
+        int stride = size * 4;
+        var pixels = new byte[stride * size];
+        if (Method<CopyPixelsDelegate>(wicBitmap, BitmapSourceCopyPixelsSlot)(wicBitmap, IntPtr.Zero, stride, pixels.Length, pixels) < 0)
+        {
+            return null;
+        }
+
+        var bitmap = new Bitmap(size, size, PixelFormat.Format32bppPArgb);
+        BitmapData data = bitmap.LockBits(new Rectangle(0, 0, size, size), ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
         try
         {
-            int stride = size * 4;
-            var pixels = new byte[stride * size];
-            if (source.CopyPixels(IntPtr.Zero, stride, pixels.Length, pixels) < 0)
+            for (int y = 0; y < size; y++)
             {
-                return null;
+                Marshal.Copy(pixels, y * stride, data.Scan0 + y * data.Stride, stride);
             }
-
-            var bitmap = new Bitmap(size, size, PixelFormat.Format32bppPArgb);
-            BitmapData data = bitmap.LockBits(new Rectangle(0, 0, size, size), ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
-            try
-            {
-                for (int y = 0; y < size; y++)
-                {
-                    Marshal.Copy(pixels, y * stride, data.Scan0 + y * data.Stride, stride);
-                }
-            }
-            finally
-            {
-                bitmap.UnlockBits(data);
-            }
-
-            return bitmap;
         }
         finally
         {
-            Marshal.ReleaseComObject(source);
+            bitmap.UnlockBits(data);
         }
+
+        return bitmap;
     }
 
     public void Dispose()
@@ -299,8 +272,8 @@ internal sealed class ColorEmojiRenderer : IDisposable
         }
 
         _formatsBySize.Clear();
-        if (_d2d is not null) Marshal.ReleaseComObject(_d2d);
-        if (_dwrite is not null) Marshal.ReleaseComObject(_dwrite);
-        if (_wic is not null) Marshal.ReleaseComObject(_wic);
+        if (_wic != IntPtr.Zero) Marshal.Release(_wic);
+        if (_dwrite != IntPtr.Zero) Marshal.Release(_dwrite);
+        if (_d2d != IntPtr.Zero) Marshal.Release(_d2d);
     }
 }

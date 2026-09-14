@@ -21,6 +21,8 @@ public sealed class AppSettings
     public bool LineNumbersVisible { get; set; } = true;
     public bool ProblemsPanelVisible { get; set; }
     public bool AutoFormatOnSave { get; set; }
+    public bool StickyScrollVisible { get; set; } = true;
+    public int EditorZoomSteps { get; set; }
     public bool MinimapVisible { get; set; }
     public bool LineGuideVisible { get; set; }
 

@@ -82,6 +82,7 @@ public sealed partial class MainForm : Form
         _currentTheme = themes.ResolveById(settings.ThemeId);
 
         _largeViewer = new LargeFileViewer { Dock = DockStyle.Fill, Font = DefaultEditorFont };
+        _largeViewer.ZoomChanged += (s, e) => PersistSettings(); // remember zoom across sessions
         _editor = _largeViewer; // the viewer is the single editing surface
         _dialogs = new WinFormsDialogService(this);
         _document = new TextDocument();
@@ -108,6 +109,21 @@ public sealed partial class MainForm : Form
 
     /// <summary>Remember a file passed on the command line; it is opened once the window is shown.</summary>
     public void OpenOnStartup(string path) => _startupPath = path;
+
+    /// <summary>Debug hook: scroll to this 1-based line before the screenshot capture.</summary>
+    public int? DebugGotoLine { get; set; }
+
+    /// <summary>Debug hook: caret column placed on the caret line for the capture.</summary>
+    public int DebugCaretColumn { get; set; }
+
+    /// <summary>Debug hook: 1-based caret line (defaults to the goto line).</summary>
+    public int? DebugCaretLine { get; set; }
+
+    /// <summary>Debug hook: 1-based block-head lines to collapse before the capture.</summary>
+    public List<int> DebugFoldLines { get; } = new();
+
+    /// <summary>Debug hook: zoom steps applied before the capture.</summary>
+    public int DebugZoomSteps { get; set; }
 
     /// <summary>Enable the debug screenshot hook: capture to <paramref name="path"/> once shown, then close.</summary>
     public void ScheduleScreenshot(string path)
@@ -300,6 +316,23 @@ public sealed partial class MainForm : Form
             timer.Dispose();
             try
             {
+                if (DebugZoomSteps != 0)
+                {
+                    _largeViewer.Zoom(DebugZoomSteps);
+                }
+
+                foreach (int foldLine in DebugFoldLines)
+                {
+                    _largeViewer.DebugToggleFold(foldLine);
+                }
+
+                if (DebugGotoLine is { } gotoLine)
+                {
+                    _largeViewer.GoToLine(gotoLine);
+                    _largeViewer.DebugCaretAt((DebugCaretLine ?? gotoLine) - 1, DebugCaretColumn);
+                    Application.DoEvents();
+                }
+
                 ScreenCapture.Capture(this, path);
             }
             catch (Exception ex)
@@ -494,9 +527,39 @@ public sealed partial class MainForm : Form
         SetFolderViewVisible(!_folderView.Visible);
         if (_folderView.Visible && _folderView.RootPath is null)
         {
-            OpenFolder();
+            // Default to the folder holding the open file; only prompt if there's no saved file.
+            if (ActiveFileDirectory() is { } dir)
+            {
+                _folderView.SetRoot(dir);
+            }
+            else
+            {
+                OpenFolder();
+            }
         }
 
+        PersistSettings();
+    }
+
+    /// <summary>The directory of the currently open file (large or small), or null when unsaved.</summary>
+    private string? ActiveFileDirectory()
+    {
+        string? path = _largeDoc is not null
+            ? _largeViewer.FilePath
+            : _controller.Document.HasPath ? _controller.Document.FilePath : null;
+
+        if (path is null)
+        {
+            return null;
+        }
+
+        string? dir = Path.GetDirectoryName(path);
+        return dir is not null && Directory.Exists(dir) ? dir : null;
+    }
+
+    private void ToggleStickyScroll()
+    {
+        _largeViewer.StickyScrollEnabled = !_largeViewer.StickyScrollEnabled;
         PersistSettings();
     }
 
@@ -788,8 +851,11 @@ public sealed partial class MainForm : Form
             // Saved font is unavailable on this machine; keep the default.
         }
 
+        _largeViewer.Zoom(settings.EditorZoomSteps); // restore saved zoom on top of the base font
+
         _statusBarRequested = settings.StatusBarVisible;
         _controller.AutoFormatOnSave = settings.AutoFormatOnSave;
+        _largeViewer.StickyScrollEnabled = settings.StickyScrollVisible;
 
         _recentFiles.Clear();
         _recentFiles.AddRange(settings.RecentFiles.Take(MaxRecentFiles));
@@ -872,13 +938,15 @@ public sealed partial class MainForm : Form
         {
             ThemeId = _currentTheme.Id,
             FontFamily = _largeViewer.Font.FontFamily.Name,
-            FontSize = _largeViewer.Font.Size,
+            FontSize = _largeViewer.BaseFontSize, // base font, without the zoom offset
             FontStyle = _largeViewer.Font.Style,
+            EditorZoomSteps = _largeViewer.ZoomSteps,
             StatusBarVisible = _statusBarRequested,
             FolderViewVisible = _folderView.Visible,
             FolderPath = _folderView.RootPath,
             RecentFiles = new List<string>(_recentFiles),
             ProblemsPanelVisible = _diagnostics.Visible,
+            StickyScrollVisible = _largeViewer.StickyScrollEnabled,
             AutoFormatOnSave = _controller.AutoFormatOnSave,
             SyntaxMode = _controller.SyntaxMode switch
             {

@@ -20,8 +20,8 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     private const int GutterPadding = 8;
     private const int MaxCopyChars = 20_000_000;
 
-    private readonly VScrollBar _vScroll = new() { Dock = DockStyle.Right };
-    private readonly HScrollBar _hScroll = new() { Dock = DockStyle.Bottom };
+    private readonly FlatScrollBar _vScroll = new(vertical: true);
+    private readonly FlatScrollBar _hScroll = new(vertical: false);
 
     private LargeFileDocument? _document; // read-only source (also the piece table's original)
     private PieceTable? _table;           // editable buffer (null => read-only)
@@ -63,10 +63,10 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
             ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
 
         BackColor = _background;
-        Font = new Font("Lucida Console", 10f);
+        Font = new Font(PickCodeFontFamily(), 10.5f);
         _lineHeight = Font.Height;
 
-        _vScroll.Scroll += (s, e) => { _topLine = _vScroll.Value; Invalidate(); };
+        _vScroll.Scroll += (s, e) => { _topLine = LineAtDisplay(_vScroll.Value); Invalidate(); };
         _hScroll.Scroll += (s, e) => { _hOffset = _hScroll.Value; Invalidate(); };
         Controls.Add(_vScroll);
         Controls.Add(_hScroll);
@@ -90,6 +90,21 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     public int TopLine => _topLine + 1;
 
+    /// <summary>Scroll so <paramref name="oneBasedLine"/> is near the top (debug/navigation helper).</summary>
+    public void GoToLine(int oneBasedLine) => ScrollToLine(Math.Max(0, oneBasedLine - 1));
+
+    /// <summary>Debug helper: collapse/expand the block headed at <paramref name="oneBasedLine"/>.</summary>
+    public void DebugToggleFold(int oneBasedLine) => ToggleFold(Math.Max(0, oneBasedLine - 1));
+
+    /// <summary>Debug helper: place the caret and refresh bracket matching (for screenshots).</summary>
+    public void DebugCaretAt(int zeroBasedLine, int column)
+    {
+        _caretLine = _anchorLine = Math.Clamp(zeroBasedLine, 0, Math.Max(0, LineCount - 1));
+        _caretCol = _anchorCol = Math.Max(0, column);
+        UpdateBracketMatch();
+        Invalidate();
+    }
+
     /// <summary>Show a file read-only (no piece table).</summary>
     public void SetDocument(LargeFileDocument document)
     {
@@ -110,6 +125,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     private void ResetView()
     {
+        ClearFolds();
         _topLine = _hOffset = 0;
         _maxLineChars = 1;
         _anchorLine = _anchorCol = _caretLine = _caretCol = 0;
@@ -141,6 +157,14 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         bool dark = background.GetBrightness() < 0.5f;
         _currentLineFill = Color.FromArgb(dark ? 38 : 26, accent);
         _bracketColor = dark ? ControlPaint.Light(accent, 0.5f) : accent;
+        RefreshOutlineColors();
+
+        // Scrollbars share the window background; the thumb is a subtle contrasting shade.
+        Color thumb = dark ? ControlPaint.Light(background, 0.22f) : ControlPaint.Dark(background, 0.16f);
+        Color thumbHot = dark ? ControlPaint.Light(background, 0.34f) : ControlPaint.Dark(background, 0.28f);
+        _vScroll.SetColors(background, thumb, thumbHot);
+        _hScroll.SetColors(background, thumb, thumbHot);
+
         BackColor = background;
         Invalidate();
     }
@@ -148,6 +172,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     public void ApplyFont(Font font)
     {
         Font = font;
+        DefaultFontSize = font.Size;
         MeasureFontMetrics();
         _gutterWidth = MeasureGutter();
         UpdateScrollRanges();
@@ -216,6 +241,25 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     private int VisibleColumns => Math.Max(1, ContentWidth / Math.Max(1, _charWidth) + 2);
 
+    /// <summary>The first installed of the preferred VS-style coding fonts (Consolas always exists on Windows).</summary>
+    private static string PickCodeFontFamily()
+    {
+        foreach (string name in new[] { "Lucida Console", "Cascadia Code", "Cascadia Mono", "Consolas" })
+        {
+            try
+            {
+                using var probe = new FontFamily(name);
+                return probe.Name;
+            }
+            catch (ArgumentException)
+            {
+                // not installed — try the next
+            }
+        }
+
+        return FontFamily.GenericMonospace.Name;
+    }
+
     private void MeasureFontMetrics()
     {
         _lineHeight = Math.Max(1, Font.Height);
@@ -231,18 +275,19 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     private int MeasureGutter()
     {
         int digits = Math.Max(2, LineCount.ToString().Length);
-        return TextRenderer.MeasureText(new string('8', digits), Font).Width + GutterPadding * 2;
+        return TextRenderer.MeasureText(new string('8', digits), Font).Width + GutterPadding * 2 + FoldMarginWidth;
     }
 
     private void UpdateScrollRanges()
     {
         int visible = VisibleLines;
+        int visibleTotal = VisibleLineTotal;
         _vScroll.Minimum = 0;
         _vScroll.LargeChange = visible;
         _vScroll.SmallChange = 1;
-        _vScroll.Maximum = Math.Max(0, LineCount - 1);
-        _vScroll.Value = Math.Clamp(_topLine, 0, _vScroll.Maximum);
-        _vScroll.Visible = LineCount > visible;
+        _vScroll.Maximum = Math.Max(0, visibleTotal - 1);
+        _vScroll.Value = Math.Clamp(DisplayIndexOf(_topLine), 0, _vScroll.Maximum);
+        _vScroll.Visible = visibleTotal > visible;
 
         int contentPixels = _maxLineChars * _charWidth;
         _hScroll.Minimum = 0;
@@ -266,8 +311,68 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         base.OnMouseWheel(e);
-        ScrollToLine(_topLine - (e.Delta / 120) * 3);
+        if ((ModifierKeys & Keys.Control) != 0)
+        {
+            Zoom(e.Delta / 120); // Ctrl+wheel zooms, like Visual Studio
+            return;
+        }
+
+        ScrollVisibleLines(-(e.Delta / 120) * 3);
     }
+
+    private const float MinFontSize = 6f;
+    private const float MaxFontSize = 48f;
+
+    /// <summary>Grow or shrink the editor font by <paramref name="steps"/> points, keeping the top line.</summary>
+    public void Zoom(int steps)
+    {
+        if (steps == 0)
+        {
+            return;
+        }
+
+        float size = Math.Clamp(Font.Size + steps, MinFontSize, MaxFontSize);
+        if (Math.Abs(size - Font.Size) < 0.01f)
+        {
+            return;
+        }
+
+        int keepTop = _topLine;
+        Font = new Font(Font.FontFamily, size, Font.Style);
+        MeasureFontMetrics();
+        _gutterWidth = MeasureGutter();
+        _topLine = keepTop;
+        UpdateScrollRanges();
+        Invalidate();
+        ZoomChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Reset the editor font to its default (unzoomed) size.</summary>
+    public void ResetZoom()
+    {
+        if (Math.Abs(Font.Size - DefaultFontSize) < 0.01f)
+        {
+            return;
+        }
+
+        Font = new Font(Font.FontFamily, DefaultFontSize, Font.Style);
+        MeasureFontMetrics();
+        _gutterWidth = MeasureGutter();
+        UpdateScrollRanges();
+        Invalidate();
+        ZoomChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Raised when the zoom level (font size) changes.</summary>
+    public event EventHandler? ZoomChanged;
+
+    private float DefaultFontSize { get; set; } = 10.5f;
+
+    /// <summary>The unzoomed font size (the size the user chose, before Ctrl+wheel zoom).</summary>
+    public float BaseFontSize => DefaultFontSize;
+
+    /// <summary>Current zoom offset in points relative to <see cref="BaseFontSize"/>.</summary>
+    public int ZoomSteps => (int)Math.Round(Font.Size - DefaultFontSize);
 
     protected override bool IsInputKey(Keys keyData) => (keyData & Keys.KeyCode) switch
     {
@@ -298,6 +403,10 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
                 case Keys.Z when IsEditable && shift: Redo(); return true;
                 case Keys.Z when IsEditable: Undo(); return true;
                 case Keys.Y when IsEditable: Redo(); return true;
+                case Keys.Oemplus or Keys.Add: Zoom(+1); return true;
+                case Keys.OemMinus or Keys.Subtract: Zoom(-1); return true;
+                case Keys.D0 or Keys.NumPad0: ResetZoom(); return true;
+                case Keys.M: ToggleFoldAtCaret(); return true; // collapse/expand the caret's block
             }
         }
         else if (IsEditable)
@@ -328,8 +437,8 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
             case Keys.Right: MoveCaret(_caretLine, _caretCol + 1, extend); break;
             case Keys.Home: MoveCaret(_caretLine, 0, extend); break;
             case Keys.End: MoveCaret(_caretLine, ContentLength(_caretLine), extend); break;
-            case Keys.PageUp: ScrollToLine(_topLine - VisibleLines); break;
-            case Keys.PageDown: ScrollToLine(_topLine + VisibleLines); break;
+            case Keys.PageUp: ScrollVisibleLines(-VisibleLines); break;
+            case Keys.PageDown: ScrollVisibleLines(VisibleLines); break;
         }
     }
 
@@ -349,6 +458,19 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     {
         base.OnMouseDown(e);
         Focus();
+
+        // A click on a pinned sticky header jumps to that block instead of moving the caret.
+        if (e.Button == MouseButtons.Left && TryStickyClick(e.Location))
+        {
+            return;
+        }
+
+        // A click on a fold marker collapses/expands that block.
+        if (e.Button == MouseButtons.Left && TryFoldMarginClick(e.Location))
+        {
+            return;
+        }
+
         if (e.Button == MouseButtons.Left)
         {
             (_caretLine, _caretCol) = PointToPosition(e.Location);
@@ -371,8 +493,9 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     {
         base.OnMouseMove(e);
 
-        // I-beam over the text, arrow over the gutter.
-        Cursor = e.X >= _gutterWidth ? Cursors.IBeam : Cursors.Default;
+        // Hand over a pinned header, I-beam over the text, arrow over the gutter.
+        bool overSticky = _stickyEnabled && e.Y < _stickyHits.Count * _lineHeight;
+        Cursor = overSticky ? Cursors.Hand : e.X >= _gutterWidth ? Cursors.IBeam : Cursors.Default;
 
         if (_selecting)
         {
@@ -415,7 +538,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     private (int Line, int Column) PointToPosition(Point p)
     {
-        int line = Math.Clamp(_topLine + p.Y / _lineHeight, 0, Math.Max(0, LineCount - 1));
+        int line = LineAtRow(Math.Max(0, p.Y / _lineHeight));
         int column = Math.Max(0, (p.X - TextLeft + _hOffset + _charWidth / 2) / _charWidth);
         column = Math.Min(column, ContentLength(line));
         return (line, column);
@@ -450,6 +573,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     private void MoveCaret(int line, int col, bool extend)
     {
         line = Math.Clamp(line, 0, Math.Max(0, LineCount - 1));
+        RevealLine(line); // never leave the caret trapped inside a collapsed block
         col = Math.Clamp(col, 0, ContentLength(line));
         _caretLine = line;
         _caretCol = col;
@@ -480,9 +604,14 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     private void InvalidateCaretRegion()
     {
+        int row = RowOf(_caretLine);
+        if (row < 0)
+        {
+            return;
+        }
+
         int x = TextLeft + Math.Min(_caretCol, ContentLength(_caretLine)) * _charWidth - _hOffset;
-        int y = (_caretLine - _topLine) * _lineHeight;
-        Invalidate(new Rectangle(x - 1, y, 3, _lineHeight + 1));
+        Invalidate(new Rectangle(x - 1, row * _lineHeight, 3, _lineHeight + 1));
     }
 
     protected override void OnGotFocus(EventArgs e)
@@ -501,13 +630,15 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     private void EnsureCaretVisible()
     {
-        if (_caretLine < _topLine)
+        int caretDisplay = DisplayIndexOf(_caretLine);
+        int topDisplay = DisplayIndexOf(_topLine);
+        if (caretDisplay < topDisplay)
         {
             ScrollToLine(_caretLine);
         }
-        else if (_caretLine >= _topLine + VisibleLines)
+        else if (caretDisplay >= topDisplay + VisibleLines)
         {
-            ScrollToLine(_caretLine - VisibleLines + 1);
+            ScrollToLine(LineAtDisplay(caretDisplay - VisibleLines + 1));
         }
 
         // Horizontal: keep the caret column within the visible band.
@@ -834,9 +965,10 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     private void ScrollToLine(int line)
     {
         _topLine = Math.Clamp(line, 0, Math.Max(0, LineCount - 1));
+        NormalizeTop();
         if (_vScroll.Visible)
         {
-            _vScroll.Value = Math.Clamp(_topLine, 0, _vScroll.Maximum);
+            _vScroll.Value = Math.Clamp(DisplayIndexOf(_topLine), 0, _vScroll.Maximum);
         }
 
         Invalidate();
@@ -900,14 +1032,9 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         int rows = VisibleLines + 1;
         int newMaxChars = _maxLineChars;
 
-        for (int row = 0; row < rows; row++)
+        int lineIndex = _topLine;
+        for (int row = 0; row < rows && lineIndex < LineCount; row++, lineIndex = NextVisible(lineIndex))
         {
-            int lineIndex = _topLine + row;
-            if (lineIndex >= LineCount)
-            {
-                break;
-            }
-
             int y = row * _lineHeight;
             int startCol = FirstVisibleColumn;
             int content = ContentLength(lineIndex);
@@ -943,12 +1070,25 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
                     TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
             }
 
+            // Marker that a collapsed block follows this (visible) head line.
+            if (FoldStartingAt(lineIndex) >= 0)
+            {
+                int ex = TextLeft + (content + 1) * _charWidth - _hOffset;
+                var chip = new Rectangle(ex, y + 2, _charWidth * 3, _lineHeight - 4);
+                using var chipPen = new Pen(_gutterForeground);
+                g.DrawRectangle(chipPen, chip);
+                TextRenderer.DrawText(g, "…", Font, chip, _gutterForeground,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+
             g.ResetClip();
         }
 
+        DrawBracketGuide(g, contentClip);
         DrawBracketMatch(g, contentClip);
         DrawCaret(g);
         DrawGutter(g);
+        DrawStickyHeaders(g);
 
         if (newMaxChars != _maxLineChars)
         {
@@ -976,7 +1116,8 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     private void DrawBracketBox(Graphics g, Brush fill, Pen pen, int charPosition)
     {
         (int line, int col) = PositionToLineColumn(charPosition);
-        if (line < _topLine || line >= _topLine + VisibleLines + 1)
+        int row = RowOf(line);
+        if (row < 0)
         {
             return;
         }
@@ -987,7 +1128,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
             return;
         }
 
-        int y = (line - _topLine) * _lineHeight;
+        int y = row * _lineHeight;
         int w = Math.Max(2, _charWidth);
         g.FillRectangle(fill, x, y, w, _lineHeight - 1);
         g.DrawRectangle(pen, x, y, w, _lineHeight - 1);
@@ -995,7 +1136,8 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     private void DrawCaret(Graphics g)
     {
-        if (!IsEditable || !Focused || !_caretOn || _caretLine < _topLine || _caretLine >= _topLine + VisibleLines + 1)
+        int row = RowOf(_caretLine);
+        if (!IsEditable || !Focused || !_caretOn || row < 0)
         {
             return;
         }
@@ -1007,7 +1149,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
             return;
         }
 
-        int y = (_caretLine - _topLine) * _lineHeight;
+        int y = row * _lineHeight;
         using var pen = new Pen(_foreground);
         g.DrawLine(pen, x, y, x, y + _lineHeight);
     }
@@ -1106,17 +1248,14 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         g.DrawLine(borderPen, _gutterWidth - 1, 0, _gutterWidth - 1, Height);
 
         int rows = VisibleLines + 1;
-        for (int row = 0; row < rows; row++)
+        int numbersRight = _gutterWidth - FoldMarginWidth;
+        int lineIndex = _topLine;
+        for (int row = 0; row < rows && lineIndex < LineCount; row++, lineIndex = NextVisible(lineIndex))
         {
-            int lineIndex = _topLine + row;
-            if (lineIndex >= LineCount)
-            {
-                break;
-            }
-
             string number = (lineIndex + 1).ToString();
             int numberWidth = TextRenderer.MeasureText(number, Font).Width;
-            TextRenderer.DrawText(g, number, Font, new Point(_gutterWidth - GutterPadding - numberWidth, row * _lineHeight), _gutterForeground);
+            TextRenderer.DrawText(g, number, Font, new Point(numbersRight - GutterPadding - numberWidth, row * _lineHeight), _gutterForeground);
+            DrawFoldMarker(g, row, lineIndex);
         }
     }
 

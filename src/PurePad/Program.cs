@@ -58,6 +58,40 @@ internal static class Program
             form.ScheduleScreenshot(screenshotPath);
         }
 
+        foreach (string arg in args)
+        {
+            if (arg.StartsWith("--goto=", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(arg["--goto=".Length..], out int line))
+            {
+                form.DebugGotoLine = line;
+            }
+            else if (arg.StartsWith("--caret-col=", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(arg["--caret-col=".Length..], out int col))
+            {
+                form.DebugCaretColumn = col;
+            }
+            else if (arg.StartsWith("--caret-line=", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(arg["--caret-line=".Length..], out int cline))
+            {
+                form.DebugCaretLine = cline;
+            }
+            else if (arg.StartsWith("--zoom=", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(arg["--zoom=".Length..], out int zoom))
+            {
+                form.DebugZoomSteps = zoom;
+            }
+            else if (arg.StartsWith("--fold=", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string part in arg["--fold=".Length..].Split(',', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (int.TryParse(part, out int fl))
+                    {
+                        form.DebugFoldLines.Add(fl);
+                    }
+                }
+            }
+        }
+
         Application.Run(form);
     }
 
