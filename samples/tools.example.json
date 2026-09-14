@@ -1,0 +1,16 @@
+{
+  // Copy this file to %APPDATA%\PurePad\tools.json to enable external tools.
+  // Each language id maps to optional "format" and "check" commands.
+  // The document is piped to the tool's stdin; its stdout is read back as the result.
+  "json": {
+    "format": { "command": "prettier", "args": ["--parser", "json"] },
+    "check":  { "command": "jsonlint", "args": ["-c", "-q"],
+                "pattern": "line (?<line>\\d+).*?column (?<col>\\d+).*?:\\s*(?<message>.+)" }
+  },
+  "code": {
+    "format": { "command": "clang-format", "args": [] }
+  },
+  "markdown": {
+    "format": { "command": "prettier", "args": ["--parser", "markdown"] }
+  }
+}

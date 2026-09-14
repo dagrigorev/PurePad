@@ -1,0 +1,14 @@
+D:\Main\purepad\src\PurePad\bin\Release\net8.0-windows\PurePad.exe
+D:\Main\purepad\src\PurePad\bin\Release\net8.0-windows\PurePad.deps.json
+D:\Main\purepad\src\PurePad\bin\Release\net8.0-windows\PurePad.runtimeconfig.json
+D:\Main\purepad\src\PurePad\bin\Release\net8.0-windows\PurePad.dll
+D:\Main\purepad\src\PurePad\bin\Release\net8.0-windows\PurePad.pdb
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\PurePad.GeneratedMSBuildEditorConfig.editorconfig
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\PurePad.AssemblyInfoInputs.cache
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\PurePad.AssemblyInfo.cs
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\PurePad.csproj.CoreCompileInputs.cache
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\PurePad.dll
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\refint\PurePad.dll
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\PurePad.pdb
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\PurePad.genruntimeconfig.cache
+D:\Main\purepad\src\PurePad\obj\Release\net8.0-windows\ref\PurePad.dll

@@ -1,0 +1,9 @@
+{
+  "name": "PurePad",
+  "version": 1.0,
+  "vista_clone": true,
+  "features": ["colorization", "reformatting", "find", "replace"],
+  "author": null,
+  "asd":asdasd,
+  "settings": { "wordWrap": false, "fontSize": 10 }
+}
