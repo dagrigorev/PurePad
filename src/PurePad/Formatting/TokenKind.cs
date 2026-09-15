@@ -28,4 +28,8 @@ public enum TokenKind
     Heading,
     /// <summary>Markdown emphasis (bold/italic) or inline code.</summary>
     Emphasis,
+    /// <summary>A regular-expression literal (e.g. JavaScript <c>/ab+c/gi</c>).</summary>
+    Regex,
+    /// <summary>A shell/script variable reference (e.g. <c>$name</c>, <c>%PATH%</c>).</summary>
+    Variable,
 }

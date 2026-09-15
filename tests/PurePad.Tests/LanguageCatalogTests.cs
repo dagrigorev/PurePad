@@ -12,6 +12,16 @@ public sealed class LanguageCatalogTests
     [InlineData("json", "json")]
     [InlineData(".xml", "xml")]
     [InlineData(".cs", "code")]
+    [InlineData(".js", "javascript")]
+    [InlineData(".jsx", "javascript")]
+    [InlineData(".ts", "javascript")]
+    [InlineData(".sh", "bash")]
+    [InlineData(".bash", "bash")]
+    [InlineData(".ps1", "powershell")]
+    [InlineData(".cmd", "batch")]
+    [InlineData(".bat", "batch")]
+    [InlineData(".sql", "sql")]
+    [InlineData(".pgsql", "sql")]
     [InlineData(".md", "markdown")]
     public void Resolves_known_extensions(string extension, string expectedId)
     {

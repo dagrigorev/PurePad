@@ -12,7 +12,11 @@ namespace PurePad.Services;
 public sealed class WinFormsDialogService : IDialogService
 {
     private const string FileFilter =
-        "Text Documents (*.txt)|*.txt|" +
+        "HTML Pages (*.html;*.htm)|*.html;*.htm|" + 
+        "XML Document (*.xml)|*.xml|" + 
+        "JSON Documents (*.json)|*.json|" + 
+        "Markdown Documents (*.md)|*.md|" + 
+        "Text Documents (*.txt)|*.txt|" + 
         "All Files (*.*)|*.*";
 
     private readonly IWin32Window _owner;
@@ -43,7 +47,7 @@ public sealed class WinFormsDialogService : IDialogService
             FilterIndex = 1,
             RestoreDirectory = true,
             FileName = suggestedFileName,
-            DefaultExt = "txt",
+            DefaultExt = "json",
             AddExtension = true,
         };
 

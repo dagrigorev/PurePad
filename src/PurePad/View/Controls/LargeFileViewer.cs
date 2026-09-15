@@ -91,6 +91,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         _caretTimer.Interval = Math.Max(200, SystemInformation.CaretBlinkTime);
         _caretTimer.Tick += (s, e) => { _caretOn = !_caretOn; InvalidateCaretRegion(); };
         _dragScrollTimer.Tick += (s, e) => DragScrollTick();
+        InitIntellisense();
     }
 
     /// <summary>Raised on the first edit and whenever content changes.</summary>
@@ -112,6 +113,21 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
 
     /// <summary>Debug helper: collapse/expand the block headed at <paramref name="oneBasedLine"/>.</summary>
     public void DebugToggleFold(int oneBasedLine) => ToggleFold(Math.Max(0, oneBasedLine - 1));
+
+    /// <summary>Debug helper: build the index and open the completion popup at the caret.</summary>
+    public void DebugShowCompletion()
+    {
+        RebuildIndex();
+        UpdateCompletion();
+    }
+
+    /// <summary>Debug helper: Ctrl+click go-to-definition at the caret position.</summary>
+    public void DebugGoToDefinition()
+    {
+        RebuildIndex();
+        int row = Math.Max(0, RowOf(_caretLine));
+        TryGoToDefinition(new Point(TextLeft + _caretCol * _charWidth - _hOffset + 1, row * _lineHeight + 1));
+    }
 
     /// <summary>Debug helper: place the caret and refresh bracket matching (for screenshots).</summary>
     public void DebugCaretAt(int zeroBasedLine, int column)
@@ -149,6 +165,8 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         MeasureFontMetrics();
         _gutterWidth = MeasureGutter();
         UpdateScrollRanges();
+        HideCompletion();
+        ScheduleIndex();
         Invalidate();
     }
 
@@ -181,6 +199,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         Color thumbHot = dark ? ControlPaint.Light(background, 0.34f) : ControlPaint.Dark(background, 0.28f);
         _vScroll.SetColors(background, thumb, thumbHot);
         _hScroll.SetColors(background, thumb, thumbHot);
+        ApplyIntellisenseColors();
 
         BackColor = background;
         Invalidate();
@@ -328,6 +347,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         base.OnMouseWheel(e);
+        HideCompletion();
         if ((ModifierKeys & Keys.Control) != 0)
         {
             Zoom(e.Delta / 120); // Ctrl+wheel zooms, like Visual Studio
@@ -409,10 +429,17 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         bool ctrl = (keyData & Keys.Control) != 0;
         bool shift = (keyData & Keys.Shift) != 0;
 
+        // The completion popup, when open, owns navigation/accept/dismiss keys.
+        if (HandleCompletionKey(key))
+        {
+            return true;
+        }
+
         if (ctrl)
         {
             switch (key)
             {
+                case Keys.Space: UpdateCompletion(); return true; // force suggestions
                 case Keys.C: CopySelection(); return true;
                 case Keys.A: SelectAll(); return true;
                 case Keys.X when IsEditable: CutSelection(); return true;
@@ -475,6 +502,13 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     {
         base.OnMouseDown(e);
         Focus();
+        HideCompletion();
+
+        // Ctrl+click navigates to a definition (or opens an include).
+        if (e.Button == MouseButtons.Left && (ModifierKeys & Keys.Control) != 0 && TryGoToDefinition(e.Location))
+        {
+            return;
+        }
 
         // A click on a pinned sticky header jumps to that block instead of moving the caret.
         if (e.Button == MouseButtons.Left && TryStickyClick(e.Location))
@@ -510,9 +544,10 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     {
         base.OnMouseMove(e);
 
-        // Hand over a pinned header, I-beam over the text, arrow over the gutter.
+        // Hand over a pinned header (or a Ctrl+hover link), I-beam over text, arrow over the gutter.
         bool overSticky = _stickyEnabled && e.Y < _stickyHits.Count * _lineHeight;
-        Cursor = overSticky ? Cursors.Hand : e.X >= _gutterWidth ? Cursors.IBeam : Cursors.Default;
+        bool ctrlLink = (ModifierKeys & Keys.Control) != 0 && e.X >= TextLeft;
+        Cursor = overSticky || ctrlLink ? Cursors.Hand : e.X >= _gutterWidth ? Cursors.IBeam : Cursors.Default;
 
         if (_selecting)
         {
@@ -522,6 +557,10 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
             _dragScrollTimer.Enabled = e.Y < 0 || e.Y > ClientSize.Height;
             SelectionChanged?.Invoke(this, EventArgs.Empty);
             Invalidate();
+        }
+        else if (!_completionOpen)
+        {
+            ScheduleHover(e.Location); // restart the hover-doc timer
         }
     }
 
@@ -594,6 +633,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         col = Math.Clamp(col, 0, ContentLength(line));
         _caretLine = line;
         _caretCol = col;
+        HideCompletion();
         if (!extend)
         {
             _anchorLine = line;
@@ -971,6 +1011,8 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         EnsureCaretVisible();
         ResetCaretBlink();
         UpdateBracketMatch();
+        ScheduleIndex();
+        UpdateCompletion();
         ModifiedChanged?.Invoke(this, EventArgs.Empty);
         TextChanged?.Invoke(this, EventArgs.Empty);
         SelectionChanged?.Invoke(this, EventArgs.Empty);
@@ -1202,7 +1244,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
     {
         int headLen = Math.Min(content, TokenizeCap);
         string head = startCol == 0 && slice.Length >= headLen ? slice : GetSlice(lineIndex, 0, headLen);
-        var tokens = _highlighter!.Tokenize(head);
+        var tokens = LineTokens(lineIndex, head);
         TokenKind trailing = TrailingKind(tokens, headLen, content);
 
         // Resolve a colour for every visible column, then draw contiguous same-colour runs.
@@ -1233,6 +1275,180 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
                 runStart = i;
             }
         }
+    }
+
+    // How far up to scan for an unterminated /* when colouring a line inside a block comment.
+    private const int MaxCommentScan = 5000;
+
+    /// <summary>
+    /// Tokenize a line's head, honouring multi-line <c>/* … */</c> block comments. When the line
+    /// begins inside a block comment, everything up to the first <c>*/</c> is coloured as a comment
+    /// and only the remainder is tokenized normally.
+    /// </summary>
+    /// <summary>The active highlighter's block-comment delimiters, when it has any.</summary>
+    private (string Open, string Close)? BlockDelims => (_highlighter as IBlockCommentDelimiters)?.BlockComment;
+
+    /// <summary>The active highlighter's multi-line template quote (e.g. a backtick), or '\0'.</summary>
+    private char TemplateQuote => (_highlighter as IMultilineTemplate)?.TemplateQuote ?? '\0';
+
+    private const int MaxTemplateScan = 400;
+
+    private List<TextToken> LineTokens(int lineIndex, string head)
+    {
+        // A line continuing a multi-line block comment: colour to the close delimiter, then tokenize.
+        if (BlockDelims is { } d && StartsInBlockComment(lineIndex, d))
+        {
+            int close = head.IndexOf(d.Close, StringComparison.Ordinal);
+            if (close < 0)
+            {
+                return new List<TextToken> { new(0, head.Length, TokenKind.Comment) };
+            }
+
+            int after = close + d.Close.Length;
+            var tokens = new List<TextToken> { new(0, after, TokenKind.Comment) };
+            AppendShifted(tokens, _highlighter!.Tokenize(head[after..]), after);
+            return tokens;
+        }
+
+        // A line continuing a multi-line template string: colour to the closing quote, then tokenize.
+        if (TemplateQuote is var q && q != '\0' && StartsInTemplate(lineIndex, q))
+        {
+            int close = FirstUnescaped(head, q);
+            int strEnd = close < 0 ? head.Length : close + 1;
+            var tokens = new List<TextToken> { new(0, strEnd, TokenKind.String) };
+            AddTemplateVariables(tokens, head, 0, close < 0 ? head.Length : close);
+            if (close >= 0)
+            {
+                AppendShifted(tokens, _highlighter!.Tokenize(head[strEnd..]), strEnd);
+            }
+
+            return tokens;
+        }
+
+        return _highlighter!.Tokenize(head).ToList();
+    }
+
+    private static void AppendShifted(List<TextToken> into, IEnumerable<TextToken> tokens, int offset)
+    {
+        foreach (TextToken t in tokens)
+        {
+            into.Add(new TextToken(t.Start + offset, t.Length, t.Kind));
+        }
+    }
+
+    /// <summary>Overlay Variable tokens for <c>${…}</c> interpolations in <paramref name="text"/>[from,to).</summary>
+    private static void AddTemplateVariables(List<TextToken> tokens, string text, int from, int to)
+    {
+        int i = from;
+        while (i < to)
+        {
+            char c = text[i];
+            if (c == '\\')
+            {
+                i += 2;
+                continue;
+            }
+
+            if (c == '$' && i + 1 < to && text[i + 1] == '{')
+            {
+                int close = text.IndexOf('}', i + 2);
+                int end = close >= 0 && close < to ? close + 1 : to;
+                tokens.Add(new TextToken(i, end - i, TokenKind.Variable));
+                i = end;
+                continue;
+            }
+
+            i++;
+        }
+    }
+
+    private static int FirstUnescaped(string text, char target)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] == '\\') { i++; continue; }
+            if (text[i] == target) return i;
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="line"/> begins inside a multi-line template string: an odd number of
+    /// top-level template quotes appear on the lines above it (bounded scan, ignoring quotes/comments).
+    /// </summary>
+    private bool StartsInTemplate(int line, char quote)
+    {
+        int limit = Math.Max(0, line - MaxTemplateScan);
+        int total = 0;
+        for (int l = line - 1; l >= limit; l--)
+        {
+            total += CountTopLevel(GetSlice(l, 0, Math.Min(ContentLength(l), TokenizeCap)), quote);
+        }
+
+        return (total & 1) == 1;
+    }
+
+    /// <summary>Count occurrences of <paramref name="quote"/> that are not inside a string or comment.</summary>
+    private static int CountTopLevel(string s, char quote)
+    {
+        int count = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == '\\') { i++; continue; }
+            if (c == '/' && i + 1 < s.Length && s[i + 1] == '/') break;               // line comment
+            if (c == '/' && i + 1 < s.Length && s[i + 1] == '*')                        // block comment
+            {
+                int close = s.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                if (close < 0) break;
+                i = close + 1;
+                continue;
+            }
+
+            if (c == '"' || c == '\'')                                                  // skip a quoted string
+            {
+                i++;
+                while (i < s.Length && s[i] != c)
+                {
+                    if (s[i] == '\\') i++;
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (c == quote) count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="line"/> begins inside a block comment, decided by the nearest
+    /// decisive open/close delimiter on the lines above it (bounded scan).
+    /// </summary>
+    private bool StartsInBlockComment(int line, (string Open, string Close) d)
+    {
+        int limit = Math.Max(0, line - MaxCommentScan);
+        for (int l = line - 1; l >= limit; l--)
+        {
+            string s = GetSlice(l, 0, Math.Min(ContentLength(l), TokenizeCap));
+            int open = s.LastIndexOf(d.Open, StringComparison.Ordinal);
+            int close = s.LastIndexOf(d.Close, StringComparison.Ordinal);
+            if (open > close)
+            {
+                return true;  // most recent marker opens a comment that this line inherits
+            }
+
+            if (close > open)
+            {
+                return false; // most recent marker closes a comment
+            }
+            // no marker on this line — keep looking further up
+        }
+
+        return false;
     }
 
     /// <summary>Kind of the token cut off at the cap (extended across the rest of a huge line), else plain.</summary>
@@ -1334,6 +1550,7 @@ public sealed partial class LargeFileViewer : Control, ITextEditor
         {
             _caretTimer.Dispose();
             _dragScrollTimer.Dispose();
+            DisposeIntellisense();
         }
 
         base.Dispose(disposing);

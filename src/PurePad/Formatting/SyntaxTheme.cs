@@ -23,6 +23,23 @@ public sealed class SyntaxTheme
     public Color ColorFor(TokenKind kind) =>
         _colors.TryGetValue(kind, out var color) ? color : DefaultForeground;
 
+    /// <summary>A copy of this theme with per-token colour overrides applied (from a language profile).</summary>
+    public SyntaxTheme WithOverrides(IReadOnlyDictionary<TokenKind, Color>? overrides)
+    {
+        if (overrides is null || overrides.Count == 0)
+        {
+            return this;
+        }
+
+        var merged = new Dictionary<TokenKind, Color>(_colors);
+        foreach ((TokenKind kind, Color color) in overrides)
+        {
+            merged[kind] = color;
+        }
+
+        return new SyntaxTheme(DefaultForeground, merged);
+    }
+
     /// <summary>
     /// A light theme reminiscent of a classic editor on the Vista "Window" background:
     /// blue keywords, green comments, dark-red strings.
@@ -45,6 +62,8 @@ public sealed class SyntaxTheme
             [TokenKind.AttributeValue] = Color.FromArgb(0, 0, 255),
             [TokenKind.Heading] = Color.FromArgb(0, 0, 200),
             [TokenKind.Emphasis] = Color.FromArgb(0, 128, 0),
+            [TokenKind.Regex] = Color.FromArgb(129, 31, 63),
+            [TokenKind.Variable] = Color.FromArgb(0, 16, 128),
         });
 
     /// <summary>
@@ -68,5 +87,7 @@ public sealed class SyntaxTheme
             [TokenKind.AttributeValue] = Color.FromArgb(206, 145, 120),
             [TokenKind.Heading] = Color.FromArgb(86, 156, 214),
             [TokenKind.Emphasis] = Color.FromArgb(106, 153, 85),
+            [TokenKind.Regex] = Color.FromArgb(209, 105, 105),
+            [TokenKind.Variable] = Color.FromArgb(156, 220, 254),
         });
 }

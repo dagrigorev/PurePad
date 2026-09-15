@@ -100,6 +100,9 @@ public sealed partial class MainForm
         _autoFormatItem = new ToolStripMenuItem("Auto-format on &Save", null, (s, e) => ToggleAutoFormat());
         format.DropDownItems.Add(_autoFormatItem);
         format.DropDownItems.Add(new ToolStripSeparator());
+        format.DropDownItems.Add(Bound("&Edit Language Profiles...", new RelayCommand(OpenLanguageProfiles)));
+        format.DropDownItems.Add(Bound("Re&load Language Profiles", new RelayCommand(ReloadLanguageProfiles)));
+        format.DropDownItems.Add(new ToolStripSeparator());
         format.DropDownItems.Add(Bound("External &Tools...", new RelayCommand(ShowExternalToolsInfo)));
 
         return format;

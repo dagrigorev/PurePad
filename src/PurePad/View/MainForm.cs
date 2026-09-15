@@ -6,6 +6,7 @@ using PurePad.Domain;
 using PurePad.Editor;
 using PurePad.Formatting;
 using PurePad.Configuration;
+using PurePad.Lsp;
 using PurePad.Diagnostics;
 using PurePad.Search;
 using PurePad.Services;
@@ -64,6 +65,8 @@ public sealed partial class MainForm : Form
     private LargeFiles.LargeFileDocument? _largeDoc;
     private readonly List<string> _recentFiles = new();
     private const int MaxRecentFiles = 10;
+    private readonly LanguageProfileStore _profileStore = new(LanguageProfileStore.DefaultPath);
+    private Font _baseEditorFont = DefaultEditorFont;
 
     public MainForm(
         IFileService fileService,
@@ -83,6 +86,7 @@ public sealed partial class MainForm : Form
 
         _largeViewer = new LargeFileViewer { Dock = DockStyle.Fill, Font = DefaultEditorFont };
         _largeViewer.ZoomChanged += (s, e) => PersistSettings(); // remember zoom across sessions
+        _largeViewer.IncludeOpenRequested += (s, name) => OpenIncludeFile(name);
         _editor = _largeViewer; // the viewer is the single editing surface
         _dialogs = new WinFormsDialogService(this);
         _document = new TextDocument();
@@ -127,6 +131,15 @@ public sealed partial class MainForm : Form
 
     /// <summary>Debug hook: open a second file (via the folder-view path) before the capture.</summary>
     public string? DebugReopenPath { get; set; }
+
+    /// <summary>Debug hook: open the completion popup at the caret before the capture.</summary>
+    public bool DebugShowCompletion { get; set; }
+
+    /// <summary>Debug hook: run the syntax checker and show the Problems panel before the capture.</summary>
+    public bool DebugRunCheck { get; set; }
+
+    /// <summary>Debug hook: Ctrl+click go-to-definition at the caret before the capture.</summary>
+    public bool DebugGoToDefinition { get; set; }
 
     /// <summary>Enable the debug screenshot hook: capture to <paramref name="path"/> once shown, then close.</summary>
     public void ScheduleScreenshot(string path)
@@ -232,7 +245,8 @@ public sealed partial class MainForm : Form
         _controller.LoadProgressChanged += (s, fraction) => OnLoadProgress(fraction);
         _controller.LoadCompleted += (s, e) => OnLoadCompleted();
         _controller.LargeFileRequested += (s, path) => _ = OpenLargeFileAsync(path);
-        _controller.DocumentOpened += (s, path) => { AddRecentFile(path); SyncViewerHighlighting(); };
+        _controller.DocumentOpened += (s, path) => { AddRecentFile(path); SyncViewerHighlighting(); SyncLsp(); };
+        _largeViewer.TextChanged += (s, e) => _lspDirty = true;
         ResizeEnd += (s, e) => PersistSettings(); // window moved/resized by the user
         SizeChanged += OnSizeChanged;              // catch maximize/restore, which ResizeEnd misses
     }
@@ -265,6 +279,8 @@ public sealed partial class MainForm : Form
     {
         base.OnShown(e);
 
+        InitLsp(); // the WinForms sync context is live now, so diagnostics marshal to the UI thread
+
         if (_startupPath is not null)
         {
             _ = _controller.OpenPathAsync(_startupPath);
@@ -291,6 +307,7 @@ public sealed partial class MainForm : Form
     {
         if (_screenshotPath is not null)
         {
+            _lsp?.Dispose();
             _largeDoc?.Dispose();
             base.OnFormClosing(e); // debug capture run: exit without prompts or persistence
             return;
@@ -303,6 +320,7 @@ public sealed partial class MainForm : Form
         else
         {
             _settingsStore.Save(CaptureSettings());
+            _lsp?.Dispose();
             _largeDoc?.Dispose();
         }
 
@@ -339,6 +357,26 @@ public sealed partial class MainForm : Form
                 {
                     _largeViewer.GoToLine(gotoLine);
                     _largeViewer.DebugCaretAt((DebugCaretLine ?? gotoLine) - 1, DebugCaretColumn);
+                    Application.DoEvents();
+                }
+
+                if (DebugRunCheck)
+                {
+                    _diagnostics.Visible = true;
+                    _diagnostics.Height = 170;
+                    _controller.CheckDocument();
+                    Application.DoEvents();
+                }
+
+                if (DebugShowCompletion)
+                {
+                    _largeViewer.DebugShowCompletion();
+                    Application.DoEvents();
+                }
+
+                if (DebugGoToDefinition)
+                {
+                    _largeViewer.DebugGoToDefinition();
                     Application.DoEvents();
                 }
 
@@ -381,6 +419,13 @@ public sealed partial class MainForm : Form
 
     private void ScheduleCheck()
     {
+        if (LspOwnsDiagnostics)
+        {
+            _checkTimer.Stop(); // the timer pushes a didChange; the server pushes diagnostics back
+            _checkTimer.Start();
+            return;
+        }
+
         if (!_controller.CanCheck || _editor.TextLength > MaxCheckChars)
         {
             _diagnostics.SetDiagnostics(Array.Empty<Diagnostic>());
@@ -517,6 +562,33 @@ public sealed partial class MainForm : Form
         }
     }
 
+    /// <summary>Resolve an <c>#include</c> target near the open file and open it (Ctrl+click).</summary>
+    private void OpenIncludeFile(string include)
+    {
+        string name = include.Replace('/', Path.DirectorySeparatorChar);
+        string? dir = ActiveFileDirectory();
+
+        var roots = new List<string>();
+        for (string? d = dir; d is not null; d = Path.GetDirectoryName(d))
+        {
+            roots.Add(d);
+            roots.Add(Path.Combine(d, "include"));
+            roots.Add(Path.Combine(d, "inc"));
+        }
+
+        foreach (string root in roots)
+        {
+            string candidate = Path.Combine(root, name);
+            if (File.Exists(candidate))
+            {
+                OpenFromFolderView(candidate);
+                return;
+            }
+        }
+
+        _dialogs.ShowInfo($"Could not find include \"{include}\" near the current file.", "PurePad");
+    }
+
     /// <summary>Prompt for a folder and show it in the sidebar.</summary>
     private void OpenFolder()
     {
@@ -550,20 +622,80 @@ public sealed partial class MainForm : Form
         PersistSettings();
     }
 
+    /// <summary>The path of the currently open file (large or small), or null when unsaved.</summary>
+    private string? ActiveFilePath() => _largeDoc is not null
+        ? _largeViewer.FilePath
+        : _controller.Document.HasPath ? _controller.Document.FilePath : null;
+
     /// <summary>The directory of the currently open file (large or small), or null when unsaved.</summary>
     private string? ActiveFileDirectory()
     {
-        string? path = _largeDoc is not null
-            ? _largeViewer.FilePath
-            : _controller.Document.HasPath ? _controller.Document.FilePath : null;
-
-        if (path is null)
+        if (ActiveFilePath() is not { } path)
         {
             return null;
         }
 
         string? dir = Path.GetDirectoryName(path);
         return dir is not null && Directory.Exists(dir) ? dir : null;
+    }
+
+    // ----- Language server (LSP) ------------------------------------------
+
+    private LspManager? _lsp;
+    private string? _lspActivePath;
+    private bool _lspDirty;
+
+    private void InitLsp()
+    {
+        _lsp = new LspManager(SynchronizationContext.Current);
+        _lsp.DiagnosticsReported += (path, diagnostics) =>
+        {
+            if (string.Equals(path, _lspActivePath, StringComparison.OrdinalIgnoreCase))
+            {
+                _diagnostics.SetDiagnostics(diagnostics);
+            }
+        };
+        _lsp.ServerMissing += command =>
+        {
+            if (!_controller.SuppressSavePrompts)
+            {
+                _dialogs.ShowInfo($"Language server '{command}' was not found on PATH; using built-in checking.", "PurePad — LSP");
+            }
+        };
+    }
+
+    /// <summary>Whether a language server currently owns diagnostics for the open document.</summary>
+    private bool LspOwnsDiagnostics => _lspActivePath is { } p && _lsp?.IsActive(p) == true;
+
+    /// <summary>Start/stop the language server as the active document or its language changes.</summary>
+    private void SyncLsp()
+    {
+        if (_lsp is null)
+        {
+            return;
+        }
+
+        string? path = ActiveFilePath();
+
+        // Close a server document we've navigated away from.
+        if (_lspActivePath is { } prev && !string.Equals(prev, path, StringComparison.OrdinalIgnoreCase))
+        {
+            _lsp.CloseDocument(prev);
+            _lspActivePath = null;
+        }
+
+        LspSettings? settings = _controller.EffectiveLanguage.Lsp;
+        if (path is null || settings is null || !_largeViewer.IsEditable)
+        {
+            return; // no path, no server for this type, or a huge (read-only) file
+        }
+
+        if (!_lsp.IsActive(path))
+        {
+            _lsp.OpenDocument(path, settings, _editor.Text);
+            _lspActivePath = path;
+            _lspDirty = false;
+        }
     }
 
     private void ToggleStickyScroll()
@@ -584,10 +716,72 @@ public sealed partial class MainForm : Form
         _folderSplitter.Visible = visible;
     }
 
-    /// <summary>Point the viewer at the effective language's highlighter and current theme palette.</summary>
+    /// <summary>Point the viewer at the effective language's highlighter, theme (with profile colour
+    /// overrides) and — for a file type with a profile font — that font.</summary>
     private void SyncViewerHighlighting()
     {
-        _largeViewer.SetHighlighting(_controller.EffectiveLanguage.Highlighter, _currentTheme.Syntax);
+        LanguageDefinition lang = _controller.EffectiveLanguage;
+        SyntaxTheme theme = _currentTheme.Syntax.WithOverrides(lang.ColorOverrides);
+        _largeViewer.SetHighlighting(lang.Highlighter, theme);
+        _largeViewer.SetCompletionWords(lang.CompletionWords);
+        ApplyLanguageFont(lang);
+    }
+
+    private string? _fontLanguageId;
+    private bool _hasLanguageFont;
+
+    /// <summary>Open the user's languages.json for editing (creating the documented default if needed).</summary>
+    private void OpenLanguageProfiles()
+    {
+        _profileStore.EnsureDefaultFile();
+        OpenFromFolderView(_profileStore.Path);
+    }
+
+    /// <summary>Re-read languages.json and re-apply syntax/colours/font to the current document.</summary>
+    private void ReloadLanguageProfiles()
+    {
+        if (_catalog is LanguageCatalog catalog)
+        {
+            catalog.ReloadProfiles(_profileStore.Load());
+            _fontLanguageId = null; // force font/colour re-application even if the id is unchanged
+            SyncViewerHighlighting();
+            _dialogs.ShowInfo("Language profiles reloaded.", "PurePad");
+        }
+    }
+
+    /// <summary>Apply a profile-defined font when a file of that type is shown; restore the global font otherwise.</summary>
+    private void ApplyLanguageFont(LanguageDefinition lang)
+    {
+        if (lang.Id == _fontLanguageId)
+        {
+            return; // only act when the language actually changes
+        }
+
+        _fontLanguageId = lang.Id;
+
+        if (lang.Font is { } f && IsFontInstalled(f.Family))
+        {
+            _largeViewer.ApplyFont(new Font(f.Family, f.Size, f.Style));
+            _hasLanguageFont = true;
+        }
+        else if (_hasLanguageFont)
+        {
+            _largeViewer.ApplyFont(_baseEditorFont); // restore the global font when leaving a profile font
+            _hasLanguageFont = false;
+        }
+    }
+
+    private static bool IsFontInstalled(string family)
+    {
+        try
+        {
+            using var probe = new FontFamily(family);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     // ----- Recent files ---------------------------------------------------
@@ -778,6 +972,18 @@ public sealed partial class MainForm : Form
     private void OnCheckTimerTick(object? sender, EventArgs e)
     {
         _checkTimer.Stop();
+
+        if (LspOwnsDiagnostics)
+        {
+            if (_lspDirty && _lspActivePath is { } path)
+            {
+                _lsp!.ChangeDocument(path, _editor.Text); // server re-publishes diagnostics
+                _lspDirty = false;
+            }
+
+            return;
+        }
+
         _controller.CheckDocument();
     }
 
@@ -804,7 +1010,7 @@ public sealed partial class MainForm : Form
         _diagnostics.ApplyTheme(palette);
         _folderView.ApplyTheme(palette);
         _largeViewer.ApplyColors(palette.EditorBackground, palette.EditorForeground, palette.GutterBackground, palette.GutterForeground, palette.Accent);
-        _largeViewer.UpdateSyntaxTheme(theme.Syntax);
+        _largeViewer.UpdateSyntaxTheme(theme.Syntax.WithOverrides(_controller?.EffectiveLanguage.ColorOverrides));
 
         ApplyChromeRenderer(_menu, palette);
         ApplyChromeRenderer(_statusStrip, palette);
@@ -859,7 +1065,8 @@ public sealed partial class MainForm : Form
     {
         try
         {
-            _largeViewer.ApplyFont(new Font(settings.FontFamily, settings.FontSize, settings.FontStyle));
+            _baseEditorFont = new Font(settings.FontFamily, settings.FontSize, settings.FontStyle);
+            _largeViewer.ApplyFont(_baseEditorFont);
         }
         catch (ArgumentException)
         {

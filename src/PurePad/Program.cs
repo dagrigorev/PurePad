@@ -31,7 +31,8 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (s, e) => LogUnhandled(e.ExceptionObject as Exception);
 
         IFileService fileService = new FileService();
-        ILanguageCatalog catalog = new LanguageCatalog();
+        var profileStore = new LanguageProfileStore(LanguageProfileStore.DefaultPath);
+        ILanguageCatalog catalog = new LanguageCatalog(profileStore.Load());
         IThemeCatalog themes = new ThemeCatalog();
 
         ToolConfiguration toolConfig = ToolConfiguration.LoadOrEmpty(ToolConfiguration.DefaultPath);
@@ -83,6 +84,18 @@ internal static class Program
             else if (arg.StartsWith("--reopen=", StringComparison.OrdinalIgnoreCase))
             {
                 form.DebugReopenPath = arg["--reopen=".Length..].Trim('"');
+            }
+            else if (arg.Equals("--complete", StringComparison.OrdinalIgnoreCase))
+            {
+                form.DebugShowCompletion = true;
+            }
+            else if (arg.Equals("--check", StringComparison.OrdinalIgnoreCase))
+            {
+                form.DebugRunCheck = true;
+            }
+            else if (arg.Equals("--gotodef", StringComparison.OrdinalIgnoreCase))
+            {
+                form.DebugGoToDefinition = true;
             }
             else if (arg.StartsWith("--fold=", StringComparison.OrdinalIgnoreCase))
             {
