@@ -23,13 +23,10 @@ public sealed class FolderTreeView : UserControl
         PathSeparator = "\\",
     };
 
-    private const string FolderClosedEmoji = "\U0001F4C1"; // 📁
-    private const string FolderOpenEmoji = "\U0001F4C2";   // 📂
+    private static readonly Color FolderAccent = Color.FromArgb(0xE8, 0xB5, 0x4D);
 
-    private readonly ColorEmojiRenderer _emojiRenderer = new();
     private readonly ImageList _images = new() { ColorDepth = ColorDepth.Depth32Bit };
-    private readonly Dictionary<string, int> _emojiIndex = new(StringComparer.Ordinal);
-    private readonly bool _useColorIcons;
+    private readonly Dictionary<string, int> _iconIndex = new(StringComparer.Ordinal);
     private readonly int _iconSize;
 
     private readonly ContextMenuStrip _menu = new();
@@ -42,17 +39,13 @@ public sealed class FolderTreeView : UserControl
 
     public FolderTreeView()
     {
-        _useColorIcons = _emojiRenderer.IsAvailable;
-        if (_useColorIcons)
-        {
-            _iconSize = (int)Math.Round(16 * (DeviceDpi / 96.0));
-            _images.ImageSize = new Size(_iconSize, _iconSize);
-            _tree.ImageList = _images;
-        }
+        _iconSize = (int)Math.Round(16 * (DeviceDpi / 96.0));
+        _images.ImageSize = new Size(_iconSize, _iconSize);
+        _tree.ImageList = _images;
 
         _tree.BeforeExpand += OnBeforeExpand;
-        _tree.AfterExpand += (s, e) => { if (e.Node is { } n) SetFolderEmoji(n, open: true); };
-        _tree.AfterCollapse += (s, e) => { if (e.Node is { } n) SetFolderEmoji(n, open: false); };
+        _tree.AfterExpand += (s, e) => { if (e.Node is { } n) SetFolderIcon(n, open: true); };
+        _tree.AfterCollapse += (s, e) => { if (e.Node is { } n) SetFolderIcon(n, open: false); };
         _tree.NodeMouseDoubleClick += (s, e) => Activate(e.Node);
         _tree.KeyDown += OnKeyDown;
         _tree.MouseDown += OnMouseDown;
@@ -102,70 +95,57 @@ public sealed class FolderTreeView : UserControl
     }
 
     /// <summary>Swap a directory node's folder icon on expand/collapse (raw name kept in Node.Name).</summary>
-    private void SetFolderEmoji(TreeNode node, bool open)
+    private void SetFolderIcon(TreeNode node, bool open)
     {
-        if (node.Tag is not string dir || !Directory.Exists(dir))
+        if (node.Tag is string dir && Directory.Exists(dir))
         {
-            return;
-        }
-
-        string emoji = open ? FolderOpenEmoji : FolderClosedEmoji;
-        if (_useColorIcons)
-        {
-            node.ImageIndex = node.SelectedImageIndex = IconIndex(emoji);
-        }
-        else
-        {
-            node.Text = $"{emoji} {node.Name}";
+            string glyph = open ? MaterialIcons.FolderOpen : MaterialIcons.Folder;
+            node.ImageIndex = node.SelectedImageIndex = IconIndex(open ? "do" : "dc", glyph, FolderAccent);
         }
     }
 
-    /// <summary>Give a node its name plus emoji icon: a color image when available, else a text prefix.</summary>
-    private void SetNodeVisual(TreeNode node, string name, string emoji)
+    /// <summary>Give a node its name and its unified icon (folder or category-coloured file glyph).</summary>
+    private void SetFolderNode(TreeNode node, string name)
     {
         node.Name = name;
-        if (_useColorIcons)
-        {
-            node.Text = name;
-            int icon = IconIndex(emoji);
-            node.ImageIndex = node.SelectedImageIndex = icon;
-        }
-        else
-        {
-            node.Text = $"{emoji} {name}";
-        }
+        node.Text = name;
+        node.ImageIndex = node.SelectedImageIndex = IconIndex("dc", MaterialIcons.Folder, FolderAccent);
     }
 
-    /// <summary>Image-list index for an emoji, rendered in color and cached (-1 if it can't render).</summary>
-    private int IconIndex(string emoji)
+    private void SetFileNode(TreeNode node, string name)
     {
-        if (_emojiIndex.TryGetValue(emoji, out int index))
+        node.Name = name;
+        node.Text = name;
+        (string glyph, Color color) = FileGlyph(name);
+        node.ImageIndex = node.SelectedImageIndex = IconIndex($"f{color.ToArgb():X8}", glyph, color);
+    }
+
+    /// <summary>Image-list index for a tinted MDI glyph, rendered once per key and cached.</summary>
+    private int IconIndex(string key, string glyph, Color color)
+    {
+        if (_iconIndex.TryGetValue(key, out int index))
         {
             return index;
         }
 
-        Bitmap? bitmap = _emojiRenderer.Render(emoji, _iconSize);
-        if (bitmap is null)
-        {
-            return _emojiIndex[emoji] = -1;
-        }
-
-        _images.Images.Add(emoji, bitmap);
-        return _emojiIndex[emoji] = _images.Images.Count - 1;
+        _images.Images.Add(key, FileIconRenderer.Render(glyph, color, _iconSize));
+        return _iconIndex[key] = _images.Images.Count - 1;
     }
 
-    /// <summary>Emoji shown as a file's icon, chosen by extension.</summary>
-    private static string FileEmoji(string name) => Path.GetExtension(name).ToLowerInvariant() switch
+    /// <summary>The Material glyph and accent colour for a file, grouped by extension category.</summary>
+    private static (string Glyph, Color Color) FileGlyph(string name) => Path.GetExtension(name).ToLowerInvariant() switch
     {
-        ".json" => "\U0001F9FE",                                                                             // 🧾
-        ".xml" or ".html" or ".htm" or ".xaml" or ".csproj" or ".config" or ".xsd" or ".resx" => "\U0001F516", // 🔖
-        ".svg" or ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".ico" or ".webp" => "\U0001F5BC️", // 🖼️
-        ".md" or ".markdown" => "\U0001F4DD",                                                                // 📝
-        ".cs" or ".js" or ".ts" or ".c" or ".cpp" or ".cc" or ".h" or ".hpp" or ".java" or ".py" or ".go"
-            or ".rs" or ".php" or ".rb" or ".css" or ".sql" or ".ps1" or ".sh" => "\U0001F4DC",              // 📜
-        ".exe" or ".dll" or ".sln" => "⚙️",                                                        // ⚙️
-        ".zip" or ".7z" or ".rar" or ".gz" or ".tar" => "\U0001F5DC️",                                  // 🗜️
-        _ => "\U0001F4C4",                                                                                   // 📄
+        ".cs" or ".js" or ".mjs" or ".cjs" or ".ts" or ".tsx" or ".jsx" or ".c" or ".cpp" or ".cc"
+            or ".h" or ".hpp" or ".java" or ".py" or ".go" or ".rs" or ".php" or ".rb" or ".css"
+            or ".sh" or ".bash" or ".ps1" or ".cmd" or ".bat" => (MaterialIcons.Code, Color.FromArgb(0x4C, 0x8D, 0xFF)),  // blue
+        ".json" or ".yaml" or ".yml" or ".toml" or ".ini" or ".conf" or ".csv" => (MaterialIcons.Json, Color.FromArgb(0x3F, 0xB9, 0x50)),      // green
+        ".xml" or ".html" or ".htm" or ".xaml" or ".csproj" or ".config" or ".xsd" or ".resx" or ".svg" => (MaterialIcons.Xml, Color.FromArgb(0xE3, 0x74, 0x2E)), // orange
+        ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".ico" or ".webp" => (MaterialIcons.Image, Color.FromArgb(0xA3, 0x71, 0xF7)),       // purple
+        ".md" or ".markdown" or ".txt" or ".rst" => (MaterialIcons.Markdown, Color.FromArgb(0x2A, 0xA9, 0xB5)),                                // teal
+        ".sql" or ".ddl" or ".dml" or ".pgsql" or ".mysql" => (MaterialIcons.Database, Color.FromArgb(0x7C, 0x6C, 0xE0)),                      // indigo
+        ".zip" or ".7z" or ".rar" or ".gz" or ".tar" => (MaterialIcons.Archive, Color.FromArgb(0xB0, 0x89, 0x68)),                             // brown
+        ".exe" or ".dll" or ".sln" => (MaterialIcons.Cog, Color.FromArgb(0x8A, 0x8F, 0x98)),                                                   // gray
+        _ => (MaterialIcons.FileDefault, Color.FromArgb(0x9A, 0xA0, 0xA8)),                                                                    // gray
     };
 
     /// <summary>Raised with the full path when a file node is activated (double-click / Enter).</summary>
@@ -188,7 +168,7 @@ public sealed class FolderTreeView : UserControl
         }
 
         var root = new TreeNode { Tag = path };
-        SetNodeVisual(root, label, FolderClosedEmoji);
+        SetFolderNode(root, label);
         AddPlaceholder(root);
         _tree.Nodes.Add(root);
         _tree.EndUpdate();
@@ -266,7 +246,7 @@ public sealed class FolderTreeView : UserControl
             {
                 string dirName = Path.GetFileName(dir);
                 var child = new TreeNode { Tag = dir };
-                SetNodeVisual(child, dirName, FolderClosedEmoji);
+                SetFolderNode(child, dirName);
                 AddPlaceholder(child);
                 node.Nodes.Add(child);
             }
@@ -275,7 +255,7 @@ public sealed class FolderTreeView : UserControl
             {
                 string fileName = Path.GetFileName(file);
                 var fileNode = new TreeNode { Tag = file };
-                SetNodeVisual(fileNode, fileName, FileEmoji(fileName));
+                SetFileNode(fileNode, fileName);
                 node.Nodes.Add(fileNode);
             }
         }
@@ -477,7 +457,6 @@ public sealed class FolderTreeView : UserControl
         {
             _menu.Dispose();
             _images.Dispose();
-            _emojiRenderer.Dispose();
         }
 
         base.Dispose(disposing);

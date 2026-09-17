@@ -1,0 +1,13 @@
+PurePad — Third-Party Notices
+=============================
+
+Material Design Icons (Pictogrammers)
+-------------------------------------
+The folder-tree file/folder icons are rendered from icon path data taken from
+Material Design Icons by Pictogrammers (https://pictogrammers.com/library/mdi/).
+
+Licensed under the Apache License, Version 2.0.
+https://github.com/Templarian/MaterialDesign/blob/master/LICENSE
+
+The embedded path data lives in src/PurePad/View/Controls/MaterialIcons.cs and
+is rasterized/tinted at runtime by FileIconRenderer.
