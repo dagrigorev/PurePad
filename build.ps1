@@ -14,7 +14,8 @@ param(
     [string]$Configuration = 'Release',
     [switch]$Test,
     [switch]$Run,
-    [switch]$NoRestore
+    [switch]$NoRestore,
+    [switch]$WarnAsError
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,8 +24,10 @@ $solution = Join-Path $root 'PurePad.sln'
 
 Write-Host "Building PurePad ($Configuration)..." -ForegroundColor Cyan
 
-$restoreArg = if ($NoRestore) { '--no-restore' } else { $null }
-dotnet build $solution -c $Configuration @($restoreArg | Where-Object { $_ })
+$extraArgs = @()
+if ($NoRestore) { $extraArgs += '--no-restore' }
+if ($WarnAsError) { $extraArgs += '-warnaserror' }
+dotnet build $solution -c $Configuration @extraArgs
 if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)." }
 
 if ($Test) {
